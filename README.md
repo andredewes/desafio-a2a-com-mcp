@@ -38,12 +38,13 @@ uv sync
 uv run python servidor.py
 ```
 
-O stderr mostra uma linha por request, com método, id JSON-RPC, nome da tool ou do resource, `retry=sim` quando o request traz `requestState`, o `traceparent` recebido, as `clientCapabilities` declaradas e o status HTTP:
+O stderr mostra uma linha por request, com método, id JSON-RPC, nome da tool ou do resource, `retry=sim` quando o request traz `requestState`, o `traceparent` recebido, as `clientCapabilities` declaradas, os headers `MCP-Protocol-Version`, `Mcp-Method` e `Mcp-Name` e o status HTTP. Um trecho de uma reserva que passou pela pausa, com o id do retry diferente do id do request inicial:
 
 ```text
-[mcp] method=tools/list id=4 traceparent=00-d2f8...de-2dae1b020c9148c1-01 clientCapabilities={"elicitation":{"form":{}}} http=200
-[mcp] method=tools/call id=6 name=reservar_sala traceparent=00-d2f8...de-b1b0610ab8a6739f-01 clientCapabilities={"elicitation":{"form":{}}} http=200
-[mcp] method=tools/call id=7 name=reservar_sala retry=sim traceparent=00-d2f8...de-945f106a9fef7184-01 clientCapabilities={"elicitation":{"form":{}}} http=200
+[mcp] method=tools/list id=4 traceparent=00-22c3e3085119a4680aaf495066f1b840-... clientCapabilities={"elicitation":{"form":{}}} headers={"mcp-protocol-version":"2026-07-28","mcp-method":"tools/list"} http=200
+[mcp] method=resources/read id=5 name=politica://uso traceparent=00-22c3e3085119a4680aaf495066f1b840-... clientCapabilities={"elicitation":{"form":{}}} headers={...,"mcp-name":"politica://uso"} http=200
+[mcp] method=tools/call id=6 name=reservar_sala traceparent=00-22c3e3085119a4680aaf495066f1b840-... clientCapabilities={"elicitation":{"form":{}}} headers={...,"mcp-name":"reservar_sala"} http=200
+[mcp] method=tools/call id=7 name=reservar_sala retry=sim traceparent=00-22c3e3085119a4680aaf495066f1b840-... clientCapabilities={"elicitation":{"form":{}}} headers={...,"mcp-name":"reservar_sala"} http=200
 ```
 
 ### 3. Terminal 2: agente
@@ -65,7 +66,7 @@ python3 validador/validar.py --agente http://localhost:7300 --mcp http://localho
 ```
 
 > [!NOTE]
-> As reservas criadas ficam na memória do servidor MCP. Antes de rodar o validador uma segunda vez, reinicie o servidor MCP para voltar ao estado de `dados/reservas.json`. Se não reiniciar, os pedidos repetidos do validador encontram as reservas da execução anterior.
+> As reservas criadas ficam na memória do servidor MCP, como o enunciado permite. O validador reserva `sala-fusca` e `sala-mirante` das 14h às 15h do dia 03/11/2026. Depois dele, o mesmo pedido para `sala-garagem` não tem mais alternativa e termina em `Sem alternativas disponiveis no intervalo`. Antes de rodar o validador de novo, ou de repetir à mão o pedido de `exemplos/wire/08-a2a-send-message.json` esperando `alternativas: sala-fusca, sala-mirante`, reinicie o servidor MCP (Ctrl+C e o mesmo comando) para voltar ao estado de `dados/reservas.json`. O agente não precisa ser reiniciado.
 
 ### Alternativa sem uv
 
@@ -89,7 +90,7 @@ python servidor.py              # em agente/: python agente.py
 
 ## Onde a ponte acontece
 
-A ponte fica em [agente/ponte.py](agente/ponte.py), no `ExecutorDeReservas`. O agente chama `reservar_sala` por [HostMCP.chamar_tool](agente/host_mcp.py:103) com `allow_input_required=True`, então o SDK devolve o `InputRequiredResult` cru em vez de tentar responder a elicitation sozinho. Em [_concluir_ou_pausar](agente/ponte.py:133), quando o resultado é `InputRequiredResult`, o agente guarda a chave de `inputRequests`, o `requestState` opaco, os argumentos originais e as alternativas do `enum` numa `Pausa` interna. Em seguida chama `updater.requires_input(...)`, e é nesse ponto que o `input_required` do MCP vira `TASK_STATE_INPUT_REQUIRED`, com a linha `alternativas: sala-fusca, sala-mirante` na mensagem da Task. Quando chega a continuação com o mesmo `taskId`, [_retomar](agente/ponte.py:111) valida a escolha contra o `enum` e reenvia o `tools/call` com os mesmos argumentos, `inputResponses` com a mesma chave e o `requestState` intacto. É nesse ponto que o `requestState` volta para o servidor, num request com id JSON-RPC novo. Uma escolha fora do `enum` mantém a Task pausada sem chamar o servidor, e `escolha=recusar` responde a elicitation com `action: "decline"`, o que termina a Task em `TASK_STATE_CANCELED`.
+A ponte fica em [agente/ponte.py](agente/ponte.py), no `ExecutorDeReservas`. O agente chama `reservar_sala` por [HostMCP.chamar_tool](agente/host_mcp.py:103) com `allow_input_required=True`, então o SDK devolve o `InputRequiredResult` cru em vez de tentar responder a elicitation sozinho. Em [_concluir_ou_pausar](agente/ponte.py:134), quando o resultado é `InputRequiredResult`, o agente guarda a chave de `inputRequests`, o `requestState` opaco, os argumentos originais e as alternativas do `enum` numa `Pausa` interna. Em seguida chama `updater.requires_input(...)`, e é nesse ponto que o `input_required` do MCP vira `TASK_STATE_INPUT_REQUIRED`, com a linha `alternativas: sala-fusca, sala-mirante` na mensagem da Task. Quando chega a continuação com o mesmo `taskId`, [_retomar](agente/ponte.py:112) valida a escolha contra o `enum` e reenvia o `tools/call` com os mesmos argumentos, `inputResponses` com a mesma chave e o `requestState` intacto. É nesse ponto que o `requestState` volta para o servidor, num request com id JSON-RPC novo. Uma escolha fora do `enum` mantém a Task pausada sem chamar o servidor, e `escolha=recusar` responde a elicitation com `action: "decline"`, o que termina a Task em `TASK_STATE_CANCELED`.
 
 Do lado do servidor, quem decide pausar é o resolver [escolha_de_sala](servidor-mcp/servidor.py:92), ligado ao parâmetro `escolha` de [reservar_sala](servidor-mcp/servidor.py:124) por `Resolve(...)`. Ele devolve `Elicit(...)` com o schema de alternativas quando há conflito, e o SDK transforma isso em `resultType: "input_required"` com a chave `__main__:escolha_de_sala`. O agente não contém regra de sala: conflito, política e alternativas vêm do servidor MCP.
 
@@ -107,11 +108,13 @@ O `requestState` vale 600 segundos (`TTL_REQUEST_STATE_SEGUNDOS`). Dez minutos c
 
 ### Estado das Tasks
 
-As Tasks A2A ficam no `InMemoryTaskStore` do `a2a-sdk` ([agente.py](agente/agente.py:77)). O que a ponte precisa para retomar (chave, `requestState`, argumentos, alternativas, versão da política e trace-id) fica no dicionário `_pausas` do `ExecutorDeReservas`, indexado pelo `taskId`. Esse dicionário nunca é serializado para o cliente A2A. As mensagens e os artifacts da Task levam só a linha de alternativas e a reserva final, e o validador confirma que nenhuma resposta A2A carrega o `requestState`. Duas Tasks pausadas ao mesmo tempo têm entradas separadas e retomam cada uma com o seu token. O estado vive na memória do agente: reiniciar o agente perde as Tasks, o que está dentro do escopo do desafio.
+As Tasks A2A ficam no `InMemoryTaskStore` do `a2a-sdk` ([agente.py](agente/agente.py:77)). Cada Task nova passa por `TASK_STATE_SUBMITTED` e `TASK_STATE_WORKING` antes de pausar ou terminar. O que a ponte precisa para retomar (chave, `requestState`, argumentos, alternativas, versão da política e trace-id) fica no dicionário `_pausas` do `ExecutorDeReservas`, indexado pelo `taskId`. Esse dicionário nunca é serializado para o cliente A2A. As mensagens e os artifacts da Task levam só a linha de alternativas, o texto de conclusão ou de erro e a reserva final, e o validador confirma que nenhuma resposta A2A carrega o `requestState`. Duas Tasks pausadas ao mesmo tempo têm entradas separadas e retomam cada uma com o seu token. O estado vive na memória do agente: reiniciar o agente perde as Tasks, o que está dentro do escopo do desafio.
+
+A mensagem final de uma Task (a confirmação, o motivo da recusa ou o texto de erro da tool, como `Sala inexistente: sala-inexistente`) aparece em `status.message` e também em `history`. O `a2a-sdk` só copia `status.message` para o `history` na troca seguinte de status, e estado terminal não tem troca seguinte. Por isso [_encerrar](agente/ponte.py:179) publica a mensagem em `TASK_STATE_WORKING` e, logo depois, no estado terminal.
 
 ### Rastreamento e protocolo sem sessão
 
-Cada Task começa com `tools/list`, depois `resources/read` de `politica://uso` (de onde sai a versão da política para o artifact) e só então `tools/call`. Todo request MCP leva no `_meta` a versão do protocolo, o `clientInfo`, as capabilities e um `traceparent`. O trace-id vem do header `traceparent` do request A2A, quando existe, e cada request MCP ganha um span-id novo. O cliente MCP é um objeto vivo reaproveitado entre chamadas, mas o servidor roda com `stateless_http=True` e lê versão e capabilities do `_meta` de cada request.
+Cada Task começa com `tools/list`, depois `resources/read` de `politica://uso` (de onde sai a versão da política para o artifact) e só então `tools/call`. Todo request MCP leva no `_meta` a versão do protocolo, o `clientInfo`, as capabilities e um `traceparent`, e leva os headers `MCP-Protocol-Version`, `Mcp-Method` e `Mcp-Name` que o SDK espelha do corpo. Do lado do servidor, o SDK recusa com `-32020` e HTTP `400` um header que não bate com o corpo. O trace-id vem do header `traceparent` do request A2A, quando existe, e cada request MCP ganha um span-id novo. O cliente MCP é um objeto vivo reaproveitado entre chamadas, mas o servidor roda com `stateless_http=True` e lê versão e capabilities do `_meta` de cada request.
 
 ### Divergências dos SDKs
 
@@ -135,7 +138,7 @@ Os `uv.lock` ficam fora do repositório porque foram gerados contra um espelho d
 Última execução, com os dois processos recém-iniciados:
 
 ```text
-trace-id desta execucao: d2f873c299260504cf755e9206ffd3de
+trace-id desta execucao: 22c3e3085119a4680aaf495066f1b840
 procure esse valor no stderr do servidor MCP para conferir a propagacao do traceparent.
 
 PASS 01 tools/list traz as tres tools

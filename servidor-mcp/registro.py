@@ -7,6 +7,8 @@ from typing import Any
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+CABECALHOS_ESPELHADOS = ("mcp-protocol-version", "mcp-method", "mcp-name")
+
 
 def _log(texto: str) -> None:
     print(f"{datetime.now().isoformat(timespec='milliseconds')} [mcp] {texto}", file=sys.stderr, flush=True)
@@ -53,6 +55,12 @@ class RegistroDeRequests:
             descricao = _descrever(json.loads(corpo))
         except (json.JSONDecodeError, UnicodeDecodeError):
             descricao = "corpo=nao-json"
+        cabecalhos = {
+            nome.decode("latin-1"): valor.decode("latin-1")
+            for nome, valor in scope.get("headers", [])
+            if nome.decode("latin-1") in CABECALHOS_ESPELHADOS
+        }
+        descricao += f" headers={json.dumps(cabecalhos, separators=(',', ':'))}"
 
         entregue = False
 

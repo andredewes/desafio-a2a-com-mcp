@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from a2a.helpers.proto_helpers import new_task_from_user_message, new_text_part
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
 from a2a.server.tasks import TaskUpdater
+from a2a.types import Message
 from mcp import MCPError
 from mcp.types import CallToolResult, ElicitRequest, ElicitResult, InputRequiredResult, TextContent
 
@@ -162,19 +163,28 @@ class ExecutorDeReservas(AgentExecutor):
         dados = resultado.structured_content or {}
         if dados.get("reservado") is False:
             motivo = dados.get("motivo") or "reserva recusada"
-            await updater.cancel(updater.new_agent_message([new_text_part(f"Reserva nao realizada: {motivo}")]))
+            await self._encerrar(updater.cancel, updater, f"Reserva nao realizada: {motivo}")
             return
 
         reserva = {campo: dados.get(campo) for campo in CAMPOS_DO_ARTIFACT}
         reserva["politica"] = politica
         await updater.add_artifact([new_text_part(json.dumps(reserva, ensure_ascii=False))], name="reserva")
-        confirmacao = f"Reserva {reserva['reserva']} confirmada na {reserva['sala']}."
-        await updater.complete(updater.new_agent_message([new_text_part(confirmacao)]))
+        await self._encerrar(updater.complete, updater, f"Reserva {reserva['reserva']} confirmada na {reserva['sala']}.")
 
     @staticmethod
     async def _pausar(updater: TaskUpdater, pausa: Pausa) -> None:
         await updater.requires_input(updater.new_agent_message([new_text_part(pausa.linha_de_alternativas())]))
 
     @staticmethod
-    async def _falhar(updater: TaskUpdater, mensagem: str) -> None:
-        await updater.failed(updater.new_agent_message([new_text_part(mensagem)]))
+    async def _encerrar(
+        estado_terminal: Callable[[Message], Awaitable[None]], updater: TaskUpdater, texto: str
+    ) -> None:
+        # O a2a-sdk so copia status.message para o history na troca seguinte de status. Estado
+        # terminal nao tem troca seguinte, entao a mensagem passa antes por WORKING para ficar no historico.
+        mensagem = updater.new_agent_message([new_text_part(texto)])
+        await updater.start_work(mensagem)
+        await estado_terminal(mensagem)
+
+    @classmethod
+    async def _falhar(cls, updater: TaskUpdater, mensagem: str) -> None:
+        await cls._encerrar(updater.failed, updater, mensagem)
